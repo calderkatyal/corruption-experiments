@@ -94,6 +94,7 @@
           <canvas class="base" id="view"></canvas>
           <canvas id="mask-canvas"></canvas>
         </div>
+        <label style="font-size:12px;color:#aaa;display:flex;align-items:center;gap:6px;margin-top:6px;cursor:pointer;"><input type="checkbox" id="toggle-masks" checked> Show masks</label>
       </div>
       <div class="stage-wrap" id="result-wrap" style="display:none">
         <div class="stage-label">Corrupted result</div>
@@ -165,6 +166,8 @@ function pushHistory(corrId) {
   redoStack = [];
   updateUndoRedoButtons();
   if (typeof clearActivePreset === 'function') clearActivePreset();
+  const tog = document.getElementById('toggle-masks');
+  if (tog && !tog.checked) { tog.checked = true; drawMaskOverlay(); }
 }
 function undo() {
   if (!undoStack.length) return;
@@ -261,8 +264,9 @@ maskCanvas.addEventListener('mousemove', e => { if (drawing) { const [x,y]=pos(e
 window.addEventListener('mouseup', () => { if (drawing) { drawing = false; updateMaskList(); } });
 
 function drawMaskOverlay() {
-  // Render ALL masks composited together, each in its own color.
   const overlay = mctx.createImageData(W, H);
+  const tog = document.getElementById('toggle-masks');
+  if (tog && !tog.checked) { mctx.clearRect(0,0,W,H); mctx.putImageData(overlay,0,0); return; }
   for (const c of CORRUPTIONS) {
     const m = masks[c.id];
     if (!m) continue;
@@ -726,6 +730,8 @@ function boxBlurInPlace(data, w, h, radius) {
 
 // ---------- Apply pipeline ----------
 function applyAll() {
+  const tog = document.getElementById('toggle-masks');
+  if (tog && !tog.checked) { tog.checked = true; drawMaskOverlay(); }
   const wrap = document.getElementById('result-wrap');
   wrap.style.display = '';
   wrap.classList.add('loading');
@@ -874,6 +880,7 @@ CORRUPTIONS.forEach(c => {
   corrListEl.appendChild(b);
 });
 
+document.getElementById('toggle-masks').addEventListener('change', drawMaskOverlay);
 document.getElementById('brush-size').oninput = e => { brushSize = +e.target.value; document.getElementById('brush-size-val').textContent = brushSize; };
 document.getElementById('brush-str').oninput = e => { brushStr = +e.target.value/100; document.getElementById('brush-str-val').textContent = brushStr.toFixed(2); };
 document.getElementById('apply-btn').onclick = () => applyAll();
