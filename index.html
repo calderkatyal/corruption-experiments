@@ -79,10 +79,18 @@
     <button id="apply-btn">Apply corruptions</button>
     <button id="clear-all" class="secondary">Clear all masks</button>
 
-    <label>Damage presets</label>
+    <label>Individual degradation presets</label>
+    <div class="row"><button id="ip-cracks" class="secondary">Cracks</button><button id="ip-paintloss" class="secondary">Paint loss</button></div>
+    <div class="row"><button id="ip-yellowing" class="secondary">Yellowing</button><button id="ip-stains" class="secondary">Stains</button></div>
+    <div class="row"><button id="ip-fading" class="secondary">Fading</button><button id="ip-blur" class="secondary">Bloom</button></div>
+    <button id="ip-deposits" class="secondary">Surface deposits</button>
+
+    <label>Multiple degradation presets</label>
     <div class="row"><button id="preset-1" class="secondary">Light Aging</button><button id="preset-2" class="secondary">Heavy Craquelure</button></div>
     <div class="row"><button id="preset-3" class="secondary">Water Damage</button><button id="preset-4" class="secondary">Sun Faded</button></div>
-    <button id="preset-5" class="secondary">Catastrophic</button>
+    <div class="row"><button id="preset-5" class="secondary">Smoke Damage</button><button id="preset-6" class="secondary">Neglected Storage</button></div>
+    <div class="row"><button id="preset-7" class="secondary">Heat Damage</button><button id="preset-8" class="secondary">Flood Damage</button></div>
+    <div class="row"><button id="preset-9" class="secondary">Museum Wear</button><button id="preset-10" class="secondary">Salt Efflorescence</button></div>
     <p><small>Paint where you want each effect. Masks of different corruptions can overlap. Click "Apply corruptions" to render the result on the right.</small></p>
   </div>
 
@@ -765,8 +773,8 @@ function applyFading(out, userMask) {
   for (let i = 0; i < W*H; i++) {
     const raw = field[i];
     if (raw < 0.01) continue;
-    // Amplify so even moderate brush gives visible effect
-    const m = Math.min(raw * 3, 1);
+    // Direct mapping — no amplification
+    const m = Math.min(raw, 1);
     const o = i*4;
     const r = data[o], g = data[o+1], b = data[o+2];
 
@@ -1259,12 +1267,14 @@ function presetCorrelatedDamage(count, minR, maxR, crackStr, lossStr) {
   }
 }
 let activePreset = null;
+const ALL_PRESET_IDS = ['ip-cracks','ip-paintloss','ip-yellowing','ip-stains','ip-fading','ip-blur','ip-deposits',
+  'preset-1','preset-2','preset-3','preset-4','preset-5','preset-6','preset-7','preset-8','preset-9','preset-10'];
 function setActivePreset(id) {
   activePreset = id;
-  for (let i = 1; i <= 5; i++) {
-    const b = document.getElementById('preset-' + i);
-    if (b) b.classList.toggle('preset-active', id === i);
-  }
+  ALL_PRESET_IDS.forEach(pid => {
+    const b = document.getElementById(pid);
+    if (b) b.classList.toggle('preset-active', id === pid);
+  });
 }
 function clearActivePreset() { setActivePreset(null); }
 function runPreset(id, fn) {
@@ -1275,54 +1285,232 @@ function runPreset(id, fn) {
   setActivePreset(id);
   applyAll();
 }
-document.getElementById('preset-1').onclick = () => runPreset(1, () => {
-  // Light aging: gentle yellowing, faint cracks, slight deposits in recesses
-  presetFill('yellowing', 0.3);
-  presetFill('deposits', 0.15);
-  presetBlobs('cracks', 3, W*0.2, W*0.4, 0.3);
-  presetCorrelatedDamage(3, W*0.03, W*0.07, 0.25, 0.15);
-  presetBlobs('blur', 2, W*0.15, W*0.3, 0.15);
-});
-document.getElementById('preset-2').onclick = () => runPreset(2, () => {
-  // Heavy craquelure: dense crack network, significant paint loss at junctions,
-  // yellowed varnish, grime settled in cracks
-  presetFill('cracks', 0.8);
-  presetFill('yellowing', 0.45);
-  presetBlobs('deposits', 6, W*0.08, W*0.2, 0.35);
-  presetCorrelatedDamage(15, W*0.04, W*0.12, 0.7, 0.6);
-  presetBlobs('blur', 3, W*0.1, W*0.25, 0.2);
-});
-document.getElementById('preset-3').onclick = () => runPreset(3, () => {
-  // Water damage: stains with tide lines, bloom/haze from moisture,
-  // paint loss where water pooled, salt deposits from evaporation
-  for (let k = 0; k < 5; k++) {
+
+// --- Individual degradation presets ---
+// Realistic random placement with varying brush sizes
+function individualPreset(corr, opts) {
+  const { minBlobs=2, maxBlobs=6, minR, maxR, minStr=0.4, maxStr=0.9, fillChance=0 } = opts;
+  // Optionally apply a light global fill
+  if (Math.random() < fillChance) {
+    presetFill(corr, 0.1 + Math.random()*0.15);
+  }
+  const count = minBlobs + Math.floor(Math.random()*(maxBlobs-minBlobs+1));
+  for (let k = 0; k < count; k++) {
     const cx = Math.floor(Math.random()*W);
     const cy = Math.floor(Math.random()*H);
-    const r = W*(0.1 + Math.random()*0.18);
-    presetPaintBlob(masks.stains, cx, cy, r, 0.75);
-    presetPaintBlob(masks.blur, cx, cy, r*1.1, 0.5);
-    presetPaintBlob(masks.paintloss, cx, cy, r*0.3, 0.45);
-    presetPaintBlob(masks.deposits, cx, cy, r*0.6, 0.55);
+    const r = minR + Math.random()*(maxR-minR);
+    const str = minStr + Math.random()*(maxStr-minStr);
+    presetPaintBlob(masks[corr], cx, cy, r, str);
   }
-  presetFill('yellowing', 0.2);
+}
+
+document.getElementById('ip-cracks').onclick = () => runPreset('ip-cracks', () => {
+  // Cracks: mix of localized clusters and broader areas
+  const hasGlobal = Math.random() > 0.5;
+  if (hasGlobal) presetFill('cracks', 0.2 + Math.random()*0.3);
+  const count = 3 + Math.floor(Math.random()*5);
+  for (let k = 0; k < count; k++) {
+    const cx = Math.floor(Math.random()*W), cy = Math.floor(Math.random()*H);
+    const r = W*(0.05 + Math.random()*0.2);
+    presetPaintBlob(masks.cracks, cx, cy, r, 0.4 + Math.random()*0.5);
+  }
 });
-document.getElementById('preset-4').onclick = () => runPreset(4, () => {
-  // Sun faded: severe bleaching, bloom from degraded varnish, mild yellowing
-  presetFill('fading', 0.8);
-  presetFill('blur', 0.4);
-  presetFill('yellowing', 0.25);
-  presetBlobs('cracks', 2, W*0.15, W*0.3, 0.2);
+document.getElementById('ip-paintloss').onclick = () => runPreset('ip-paintloss', () => {
+  // Paint loss: SMALL scattered patches — never huge areas
+  const count = 4 + Math.floor(Math.random()*8);
+  for (let k = 0; k < count; k++) {
+    const cx = Math.floor(Math.random()*W), cy = Math.floor(Math.random()*H);
+    const r = W*(0.01 + Math.random()*0.06); // small brushes
+    presetPaintBlob(masks.paintloss, cx, cy, r, 0.5 + Math.random()*0.5);
+  }
+  // Add correlated cracks where paint is lost (realistic)
+  for (let k = 0; k < Math.floor(count*0.6); k++) {
+    const cx = Math.floor(Math.random()*W), cy = Math.floor(Math.random()*H);
+    const r = W*(0.02 + Math.random()*0.08);
+    presetPaintBlob(masks.cracks, cx, cy, r, 0.3 + Math.random()*0.3);
+  }
 });
-document.getElementById('preset-5').onclick = () => runPreset(5, () => {
-  // Catastrophic: severe multi-factor degradation — fire/flood/neglect
-  presetFill('yellowing', 0.6);
-  presetFill('fading', 0.5);
-  presetFill('cracks', 0.9);
-  presetFill('deposits', 0.65);
-  presetCorrelatedDamage(25, W*0.04, W*0.15, 0.85, 0.8);
-  presetBlobs('stains', 8, W*0.08, W*0.2, 0.7);
-  presetBlobs('blur', 5, W*0.1, W*0.25, 0.5);
-  presetBlobs('paintloss', 4, W*0.1, W*0.2, 0.7);
+document.getElementById('ip-yellowing').onclick = () => runPreset('ip-yellowing', () => {
+  // Yellowing (varnish): usually global/broad
+  presetFill('yellowing', 0.25 + Math.random()*0.45);
+  // Some slightly thicker areas where varnish pooled
+  const count = 2 + Math.floor(Math.random()*3);
+  for (let k = 0; k < count; k++) {
+    const cx = Math.floor(Math.random()*W), cy = Math.floor(Math.random()*H);
+    const r = W*(0.1 + Math.random()*0.2);
+    presetPaintBlob(masks.yellowing, cx, cy, r, 0.2 + Math.random()*0.2);
+  }
+});
+document.getElementById('ip-stains').onclick = () => runPreset('ip-stains', () => {
+  // Stains: medium blotches with varied sizes
+  const count = 2 + Math.floor(Math.random()*5);
+  for (let k = 0; k < count; k++) {
+    const cx = Math.floor(Math.random()*W), cy = Math.floor(Math.random()*H);
+    const r = W*(0.04 + Math.random()*0.14);
+    presetPaintBlob(masks.stains, cx, cy, r, 0.4 + Math.random()*0.5);
+  }
+});
+document.getElementById('ip-fading').onclick = () => runPreset('ip-fading', () => {
+  // Fading: broad (sun exposure) or localized patches
+  if (Math.random() > 0.4) {
+    // Broad fading
+    presetFill('fading', 0.3 + Math.random()*0.5);
+  }
+  const count = 2 + Math.floor(Math.random()*4);
+  for (let k = 0; k < count; k++) {
+    const cx = Math.floor(Math.random()*W), cy = Math.floor(Math.random()*H);
+    const r = W*(0.1 + Math.random()*0.25);
+    presetPaintBlob(masks.fading, cx, cy, r, 0.4 + Math.random()*0.5);
+  }
+});
+document.getElementById('ip-blur').onclick = () => runPreset('ip-blur', () => {
+  // Bloom: localized hazy patches from moisture/varnish degradation
+  const count = 2 + Math.floor(Math.random()*4);
+  for (let k = 0; k < count; k++) {
+    const cx = Math.floor(Math.random()*W), cy = Math.floor(Math.random()*H);
+    const r = W*(0.06 + Math.random()*0.18);
+    presetPaintBlob(masks.blur, cx, cy, r, 0.4 + Math.random()*0.5);
+  }
+});
+document.getElementById('ip-deposits').onclick = () => runPreset('ip-deposits', () => {
+  // Surface deposits: grime/soot patches, some broad, some localized
+  if (Math.random() > 0.5) presetFill('deposits', 0.1 + Math.random()*0.2);
+  const count = 3 + Math.floor(Math.random()*5);
+  for (let k = 0; k < count; k++) {
+    const cx = Math.floor(Math.random()*W), cy = Math.floor(Math.random()*H);
+    const r = W*(0.05 + Math.random()*0.15);
+    presetPaintBlob(masks.deposits, cx, cy, r, 0.3 + Math.random()*0.6);
+  }
+});
+
+// --- Multiple degradation presets (10 common real-world damage patterns) ---
+document.getElementById('preset-1').onclick = () => runPreset('preset-1', () => {
+  // Light Aging: gentle yellowing, faint cracks, slight deposits
+  presetFill('yellowing', 0.2 + Math.random()*0.15);
+  presetFill('deposits', 0.08 + Math.random()*0.08);
+  presetBlobs('cracks', 2+Math.floor(Math.random()*3), W*0.12, W*0.3, 0.2);
+  presetBlobs('blur', 1+Math.floor(Math.random()*2), W*0.1, W*0.2, 0.1);
+});
+document.getElementById('preset-2').onclick = () => runPreset('preset-2', () => {
+  // Heavy Craquelure: dense crack network, paint loss at junctions, grime in cracks
+  presetFill('cracks', 0.6 + Math.random()*0.25);
+  presetFill('yellowing', 0.3 + Math.random()*0.15);
+  presetBlobs('deposits', 4+Math.floor(Math.random()*4), W*0.06, W*0.15, 0.25);
+  presetCorrelatedDamage(8+Math.floor(Math.random()*8), W*0.02, W*0.08, 0.6, 0.5);
+});
+document.getElementById('preset-3').onclick = () => runPreset('preset-3', () => {
+  // Water Damage: stains with tide lines, bloom, small paint loss, salt deposits
+  const nStains = 3 + Math.floor(Math.random()*4);
+  for (let k = 0; k < nStains; k++) {
+    const cx = Math.floor(Math.random()*W), cy = Math.floor(Math.random()*H);
+    const r = W*(0.06 + Math.random()*0.14);
+    presetPaintBlob(masks.stains, cx, cy, r, 0.5 + Math.random()*0.4);
+    presetPaintBlob(masks.blur, cx, cy, r*0.9, 0.3 + Math.random()*0.2);
+    presetPaintBlob(masks.deposits, cx, cy, r*0.5, 0.3 + Math.random()*0.3);
+    // Small paint loss where water pooled
+    if (Math.random() > 0.4) presetPaintBlob(masks.paintloss, cx, cy, r*0.2, 0.3 + Math.random()*0.3);
+  }
+  presetFill('yellowing', 0.1 + Math.random()*0.15);
+});
+document.getElementById('preset-4').onclick = () => runPreset('preset-4', () => {
+  // Sun Faded: severe bleaching, bloom from degraded varnish, mild cracks
+  presetFill('fading', 0.5 + Math.random()*0.35);
+  presetBlobs('fading', 2+Math.floor(Math.random()*3), W*0.15, W*0.3, 0.3);
+  presetFill('blur', 0.2 + Math.random()*0.2);
+  presetFill('yellowing', 0.15 + Math.random()*0.15);
+  presetBlobs('cracks', 2, W*0.1, W*0.25, 0.15);
+});
+document.getElementById('preset-5').onclick = () => runPreset('preset-5', () => {
+  // Smoke Damage: heavy soot/grime deposits, yellowing from heat, slight bloom
+  presetFill('deposits', 0.4 + Math.random()*0.3);
+  presetBlobs('deposits', 3+Math.floor(Math.random()*4), W*0.1, W*0.25, 0.4);
+  presetFill('yellowing', 0.35 + Math.random()*0.25);
+  presetBlobs('blur', 2, W*0.1, W*0.2, 0.15);
+  presetBlobs('cracks', 2, W*0.08, W*0.18, 0.2);
+});
+document.getElementById('preset-6').onclick = () => runPreset('preset-6', () => {
+  // Neglected Storage: mold stains, grime, foxing spots, mild cracks
+  // Foxing: many small brown spots
+  const foxCount = 10 + Math.floor(Math.random()*15);
+  for (let k = 0; k < foxCount; k++) {
+    const cx = Math.floor(Math.random()*W), cy = Math.floor(Math.random()*H);
+    const r = W*(0.005 + Math.random()*0.02); // tiny spots
+    presetPaintBlob(masks.stains, cx, cy, r, 0.4 + Math.random()*0.4);
+  }
+  // Larger mold patches
+  presetBlobs('stains', 2+Math.floor(Math.random()*3), W*0.05, W*0.12, 0.4);
+  presetFill('deposits', 0.15 + Math.random()*0.2);
+  presetBlobs('deposits', 3, W*0.08, W*0.15, 0.3);
+  presetBlobs('cracks', 3, W*0.1, W*0.2, 0.2);
+  presetFill('yellowing', 0.15 + Math.random()*0.15);
+});
+document.getElementById('preset-7').onclick = () => runPreset('preset-7', () => {
+  // Heat Damage: cracks from thermal stress, yellowing, paint blistering/loss, bloom
+  presetFill('cracks', 0.5 + Math.random()*0.3);
+  presetFill('yellowing', 0.3 + Math.random()*0.25);
+  // Paint blisters: small scattered paint loss
+  const blisters = 6 + Math.floor(Math.random()*8);
+  for (let k = 0; k < blisters; k++) {
+    const cx = Math.floor(Math.random()*W), cy = Math.floor(Math.random()*H);
+    const r = W*(0.01 + Math.random()*0.04);
+    presetPaintBlob(masks.paintloss, cx, cy, r, 0.5 + Math.random()*0.4);
+    presetPaintBlob(masks.cracks, cx, cy, r*1.5, 0.4 + Math.random()*0.3);
+  }
+  presetBlobs('blur', 2+Math.floor(Math.random()*3), W*0.08, W*0.18, 0.25);
+});
+document.getElementById('preset-8').onclick = () => runPreset('preset-8', () => {
+  // Flood Damage: heavy stains, significant paint loss, deposits, bloom
+  const nZones = 3 + Math.floor(Math.random()*3);
+  // Flood line from bottom
+  const floodY = H * (0.3 + Math.random()*0.4);
+  for (let k = 0; k < nZones; k++) {
+    const cx = Math.floor(Math.random()*W);
+    const cy = floodY + Math.floor((Math.random()-0.3)*H*0.3);
+    const r = W*(0.08 + Math.random()*0.15);
+    presetPaintBlob(masks.stains, cx, cy, r, 0.6 + Math.random()*0.3);
+    presetPaintBlob(masks.blur, cx, cy, r*0.8, 0.3 + Math.random()*0.3);
+    presetPaintBlob(masks.deposits, cx, cy, r*0.6, 0.3 + Math.random()*0.3);
+  }
+  // Paint loss in affected zone (small patches)
+  const lossCount = 5 + Math.floor(Math.random()*6);
+  for (let k = 0; k < lossCount; k++) {
+    const cx = Math.floor(Math.random()*W);
+    const cy = floodY + Math.floor((Math.random()-0.2)*H*0.25);
+    const r = W*(0.01 + Math.random()*0.04);
+    presetPaintBlob(masks.paintloss, cx, cy, r, 0.4 + Math.random()*0.5);
+  }
+  presetFill('yellowing', 0.15 + Math.random()*0.15);
+});
+document.getElementById('preset-9').onclick = () => runPreset('preset-9', () => {
+  // Museum Wear: gentle overall aging — light cracks, fading, deposits in recesses
+  presetFill('yellowing', 0.15 + Math.random()*0.15);
+  presetFill('deposits', 0.06 + Math.random()*0.08);
+  presetFill('fading', 0.1 + Math.random()*0.15);
+  presetBlobs('cracks', 3+Math.floor(Math.random()*3), W*0.1, W*0.25, 0.15);
+  presetBlobs('blur', 1+Math.floor(Math.random()*2), W*0.08, W*0.15, 0.1);
+  // Tiny wear spots along edges
+  for (let k = 0; k < 4; k++) {
+    const edge = Math.random();
+    const cx = edge < 0.5 ? Math.floor(Math.random()*W*0.1) : W - Math.floor(Math.random()*W*0.1);
+    const cy = Math.floor(Math.random()*H);
+    const r = W*(0.01 + Math.random()*0.03);
+    presetPaintBlob(masks.paintloss, cx, cy, r, 0.3 + Math.random()*0.3);
+  }
+});
+document.getElementById('preset-10').onclick = () => runPreset('preset-10', () => {
+  // Salt Efflorescence: heavy salt deposits, associated cracks, small paint loss
+  presetFill('deposits', 0.3 + Math.random()*0.3);
+  presetBlobs('deposits', 5+Math.floor(Math.random()*5), W*0.05, W*0.15, 0.5);
+  presetBlobs('cracks', 4+Math.floor(Math.random()*4), W*0.08, W*0.2, 0.3);
+  // Small paint loss from salt crystallization pressure
+  const lossCount = 5 + Math.floor(Math.random()*7);
+  for (let k = 0; k < lossCount; k++) {
+    const cx = Math.floor(Math.random()*W), cy = Math.floor(Math.random()*H);
+    const r = W*(0.01 + Math.random()*0.03);
+    presetPaintBlob(masks.paintloss, cx, cy, r, 0.4 + Math.random()*0.4);
+    presetPaintBlob(masks.cracks, cx, cy, r*1.5, 0.3 + Math.random()*0.3);
+  }
+  presetFill('yellowing', 0.1 + Math.random()*0.1);
 });
 window.addEventListener('keydown', e => {
   if ((e.metaKey || e.ctrlKey) && e.key === 'z' && !e.shiftKey) { e.preventDefault(); undo(); }
