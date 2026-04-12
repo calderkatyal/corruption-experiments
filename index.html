@@ -248,9 +248,10 @@ function paintAt(x, y) {
       const d2 = dx*dx + dy*dy;
       if (d2 > r2) continue;
       const falloff = 1 - Math.sqrt(d2) / r;
-      const add = brushStr * falloff * 255;
+      const target = Math.round(brushStr * falloff * 255);
       const i = yy * W + xx;
-      m[i] = Math.min(255, m[i] + add);
+      // Max, not additive: painting over same area doesn't increase intensity
+      m[i] = Math.max(m[i], target);
     }
   }
 }
@@ -487,13 +488,23 @@ function applyCracks(out, userMask) {
   const meanMask = maskSum / userMask.length / 255;
   // target site count: many small cells for fine craquelure
   const target = Math.max(40, Math.floor(meanMask * W * H / 60));
+  const minDist = 5; // minimum spacing between sites to avoid tiny cells
+  const minDist2 = minDist * minDist;
   let attempts = 0;
   while (sites.length < target && attempts < target * 50) {
     attempts++;
     const x = Math.floor(rng() * W);
     const y = Math.floor(rng() * H);
     const m = userMask[y*W + x] / 255;
-    if (rng() < m) sites.push([x, y]);
+    if (rng() < m) {
+      // Check minimum distance from existing sites
+      let tooClose = false;
+      for (let k = sites.length - 1; k >= Math.max(0, sites.length - 50); k--) {
+        const dx = sites[k][0] - x, dy = sites[k][1] - y;
+        if (dx*dx + dy*dy < minDist2) { tooClose = true; break; }
+      }
+      if (!tooClose) sites.push([x, y]);
+    }
   }
   if (sites.length < 2) return new Uint8Array(W*H);
 
@@ -511,8 +522,11 @@ function applyCracks(out, userMask) {
         else if (d < d2) { d2 = d; }
       }
       // edge if difference of distances is tiny -> hairline
-      const diff = Math.sqrt(d2) - Math.sqrt(d1);
-      if (diff < 0.6) {
+      const sd1 = Math.sqrt(d1), sd2 = Math.sqrt(d2);
+      const diff = sd2 - sd1;
+      // Skip tiny cells: if nearest site is very close, the "edge" is just
+      // a small filled polygon, not a realistic crack line.
+      if (diff < 0.6 && sd1 > 2.5) {
         crackMask[idx] = 255;
         const o = idx*4;
         const a = userMask[idx] / 255;
@@ -528,44 +542,78 @@ function applyCracks(out, userMask) {
 }
 
 function applyPaintLoss(out, userMask, crackMask) {
+  // Crack-associated paint loss: small flakes that detach along crack edges.
+  // Uses smooth noise to decide which crack-adjacent pixels lose paint,
+  // avoiding the geometric/spotty look of pure random sampling.
   const data = out.data;
-  // dilate crack mask by ~2 px
-  const dil = new Uint8Array(W*H);
-  const r = 2;
-  for (let y = 0; y < H; y++) {
-    for (let x = 0; x < W; x++) {
-      let hit = false;
-      for (let dy = -r; dy <= r && !hit; dy++) {
-        for (let dx = -r; dx <= r && !hit; dx++) {
-          const xx = x+dx, yy = y+dy;
-          if (xx<0||yy<0||xx>=W||yy>=H) continue;
-          if (crackMask[yy*W+xx]) hit = true;
-        }
-      }
-      if (hit) dil[y*W+x] = 255;
-    }
-  }
-  // sample canvas color = mean RGB of original image
-  let mr=0, mg=0, mb=0, n=0;
-  const od = originalImageData.data;
-  for (let i = 0; i < od.length; i += 4*40) { mr += od[i]; mg += od[i+1]; mb += od[i+2]; n++; }
-  mr/=n; mg/=n; mb/=n;
-  // shift toward warm canvas
-  mr = Math.min(255, mr*0.7 + 180*0.3);
-  mg = Math.min(255, mg*0.7 + 160*0.3);
-  mb = Math.min(255, mb*0.7 + 130*0.3);
+  const [cr, cg, cb] = sampleCanvasColor();
 
-  for (let i = 0; i < dil.length; i++) {
-    if (!dil[i]) continue;
+  // Build a smooth "flake probability" field near cracks using canvas blur
+  // of the crack mask itself — this creates organic falloff from cracks.
+  const flakeField = new Float32Array(W*H);
+  {
+    const nc = document.createElement('canvas');
+    nc.width = W; nc.height = H;
+    const nctx = nc.getContext('2d');
+    const nimg = nctx.createImageData(W, H);
+    for (let i = 0; i < W*H; i++) {
+      const v = crackMask[i];
+      nimg.data[i*4] = v; nimg.data[i*4+1] = v;
+      nimg.data[i*4+2] = v; nimg.data[i*4+3] = 255;
+    }
+    nctx.putImageData(nimg, 0, 0);
+    const nc2 = document.createElement('canvas');
+    nc2.width = W; nc2.height = H;
+    const nctx2 = nc2.getContext('2d');
+    nctx2.filter = 'blur(3px)';
+    nctx2.drawImage(nc, 0, 0);
+    const blurred = nctx2.getImageData(0, 0, W, H).data;
+    for (let i = 0; i < W*H; i++) flakeField[i] = blurred[i*4] / 255;
+  }
+
+  // Smooth noise field (canvas-blurred) to decide flake regions organically
+  const noiseField = new Float32Array(W*H);
+  {
+    const nc3 = document.createElement('canvas');
+    nc3.width = W; nc3.height = H;
+    const ctx3 = nc3.getContext('2d');
+    const nimg3 = ctx3.createImageData(W, H);
+    for (let i = 0; i < W*H; i++) {
+      const v = Math.round(rng() * 255);
+      nimg3.data[i*4] = v; nimg3.data[i*4+1] = v;
+      nimg3.data[i*4+2] = v; nimg3.data[i*4+3] = 255;
+    }
+    ctx3.putImageData(nimg3, 0, 0);
+    const nc4 = document.createElement('canvas');
+    nc4.width = W; nc4.height = H;
+    const ctx4 = nc4.getContext('2d');
+    ctx4.filter = 'blur(4px)';
+    ctx4.drawImage(nc3, 0, 0);
+    const blurredN = ctx4.getImageData(0, 0, W, H).data;
+    for (let i = 0; i < W*H; i++) noiseField[i] = blurredN[i*4] / 255;
+  }
+
+  for (let i = 0; i < W*H; i++) {
+    const ff = flakeField[i];
+    if (ff < 0.05) continue;
     const um = userMask[i] / 255;
     if (um < 0.05) continue;
-    if (rng() < 0.55 * um) {
-      const o = i*4;
-      const jitter = (rng()-0.5)*30;
-      data[o]   = Math.max(0, Math.min(255, mr + jitter));
-      data[o+1] = Math.max(0, Math.min(255, mg + jitter));
-      data[o+2] = Math.max(0, Math.min(255, mb + jitter));
-    }
+    // Smooth flake alpha: combine crack proximity, user mask, and smooth noise
+    // This creates organic patches of paint loss near cracks, not per-pixel dots
+    const nv = noiseField[i];
+    const combined = ff * um;
+    // Threshold: only flake where noise is below the combined strength
+    const threshold = combined * 0.5;
+    if (nv > threshold + 0.25) continue;
+    // Smooth alpha ramp near threshold boundary
+    const edge = 1 - Math.max(0, Math.min(1, (nv - threshold) / 0.25));
+    const a = Math.min(0.95, combined * edge);
+    if (a < 0.02) continue;
+    const o = i*4;
+    const j = (rng()-0.5)*12;
+    data[o]   = data[o]*(1-a)   + (cr+j)*a;
+    data[o+1] = data[o+1]*(1-a) + (cg+j)*a;
+    data[o+2] = data[o+2]*(1-a) + (cb+j)*a;
   }
 }
 
@@ -1151,7 +1199,7 @@ document.getElementById('redo-btn').onclick = redo;
 
 document.getElementById('fill-all').onclick = () => {
   pushHistory(activeCorr);
-  masks[activeCorr].fill(255);
+  masks[activeCorr].fill(Math.round(brushStr * 255));
   drawMaskOverlay(); updateMaskList();
 };
 
