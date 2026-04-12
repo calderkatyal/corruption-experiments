@@ -594,53 +594,89 @@ function applyYellowing(out, userMask) {
 }
 
 function applyStains(out, userMask) {
+  // Water stains: brown/amber discoloration with characteristic tide lines
+  // (darker ring at the edge of the wet area where dissolved minerals
+  // concentrate as water evaporates from the perimeter inward).
   const data = out.data;
-  // place random ellipses inside masked region
   let maskSum = 0;
   for (let i = 0; i < userMask.length; i++) maskSum += userMask[i];
   if (maskSum === 0) return;
-  const numStains = Math.max(1, Math.floor(maskSum / 255 / 2500));
-  // build a stain field (Float)
-  const field = new Float32Array(W*H);
+
+  // Scale stain count with mask area — more stains at higher coverage
+  const maskArea = maskSum / 255;
+  const numStains = Math.max(2, Math.floor(maskArea / 800));
+
+  // Build stain distance field: each stain is an ellipse.
+  // Store both the "fill" (interior) and "edge" (tide line) separately.
+  const fillField = new Float32Array(W*H);
+  const edgeField = new Float32Array(W*H);
+
   for (let n = 0; n < numStains; n++) {
-    // pick a random pixel weighted by user mask
     let cx, cy;
-    for (let tries = 0; tries < 200; tries++) {
+    for (let tries = 0; tries < 300; tries++) {
       const x = Math.floor(rng()*W);
       const y = Math.floor(rng()*H);
       if (rng() < userMask[y*W+x]/255) { cx = x; cy = y; break; }
     }
     if (cx === undefined) continue;
-    const rx = 15 + rng()*40;
-    const ry = 15 + rng()*40;
+    const rx = 20 + rng()*60;
+    const ry = 20 + rng()*50;
     const angle = rng() * Math.PI;
     const ca = Math.cos(angle), sa = Math.sin(angle);
-    const intensity = 0.3 + rng()*0.4;
-    const x0 = Math.max(0, Math.floor(cx - rx*1.5));
-    const x1 = Math.min(W-1, Math.ceil(cx + rx*1.5));
-    const y0 = Math.max(0, Math.floor(cy - ry*1.5));
-    const y1 = Math.min(H-1, Math.ceil(cy + ry*1.5));
+    const stainStr = 0.4 + rng()*0.5;
+    const x0 = Math.max(0, Math.floor(cx - Math.max(rx,ry)*1.6));
+    const x1 = Math.min(W-1, Math.ceil(cx + Math.max(rx,ry)*1.6));
+    const y0 = Math.max(0, Math.floor(cy - Math.max(rx,ry)*1.6));
+    const y1 = Math.min(H-1, Math.ceil(cy + Math.max(rx,ry)*1.6));
     for (let y = y0; y <= y1; y++) {
       for (let x = x0; x <= x1; x++) {
         const dx = x - cx, dy = y - cy;
         const u = (dx*ca + dy*sa)/rx;
         const v = (-dx*sa + dy*ca)/ry;
-        const d = u*u + v*v;
-        if (d > 2.5) continue;
-        const falloff = Math.exp(-d*1.5);
-        field[y*W+x] += falloff * intensity;
+        const d = Math.sqrt(u*u + v*v);
+        if (d > 1.5) continue;
+        // Interior fill: smooth falloff
+        const fill = Math.max(0, 1 - d) * stainStr;
+        fillField[y*W+x] = Math.min(1, fillField[y*W+x] + fill);
+        // Tide line: concentrated ring near the edge (d ≈ 0.75–1.05)
+        const edgeDist = Math.abs(d - 0.9);
+        if (edgeDist < 0.2) {
+          const tideLine = (1 - edgeDist/0.2) * stainStr * 1.2;
+          edgeField[y*W+x] = Math.min(1, edgeField[y*W+x] + tideLine);
+        }
       }
     }
   }
-  blurFloatField(field, W, H, 6);
+
+  // Stain colors: warm brown tones (foxing, water damage, tea-like)
+  const stainR = 140, stainG = 105, stainB = 60;
+  // Tide line: darker brown
+  const tideR = 90, tideG = 65, tideB = 35;
+
   for (let i = 0; i < W*H; i++) {
-    const f = Math.min(0.85, field[i]) * (userMask[i]/255);
-    if (f < 0.01) continue;
+    const m = userMask[i] / 255;
+    if (m < 0.01) continue;
+    const fill = Math.min(0.7, fillField[i]) * m;
+    const edge = Math.min(0.85, edgeField[i]) * m;
+    if (fill < 0.01 && edge < 0.01) continue;
     const o = i*4;
-    const k = 1 - f;
-    data[o]   *= k;
-    data[o+1] *= k * 0.95;
-    data[o+2] *= k * 0.85;
+    // Apply interior stain: blend toward warm brown
+    let rr = data[o], gg = data[o+1], bb = data[o+2];
+    if (fill > 0.01) {
+      rr = rr * (1 - fill*0.5) + stainR * fill*0.5;
+      gg = gg * (1 - fill*0.55) + stainG * fill*0.55;
+      bb = bb * (1 - fill*0.6) + stainB * fill*0.6;
+    }
+    // Apply tide line: darker ring overlay
+    if (edge > 0.01) {
+      const ea = edge * 0.6;
+      rr = rr * (1 - ea) + tideR * ea;
+      gg = gg * (1 - ea) + tideG * ea;
+      bb = bb * (1 - ea) + tideB * ea;
+    }
+    data[o]   = Math.max(0, Math.min(255, rr));
+    data[o+1] = Math.max(0, Math.min(255, gg));
+    data[o+2] = Math.max(0, Math.min(255, bb));
   }
 }
 
@@ -693,20 +729,23 @@ function applyFading(out, userMask) {
 }
 
 function applyBlur(out, userMask) {
-  // Bloom / haze: bright areas bleed outward into surrounding pixels,
-  // producing a soft luminous glow typical of aged varnish or lens bloom.
+  // Bloom / haze: simulates degraded varnish or moisture haze.
+  // Effect: bright areas bleed outward (luminous glow), overall detail
+  // softens, contrast compresses. At high intensity the painting looks
+  // like it's behind a frosted/milky varnish layer.
   const data = out.data;
+
+  // 1. Extract ALL pixel luminance for glow source (low knee so even
+  //    dark paintings produce visible bloom)
   const off = document.createElement('canvas');
   off.width = W; off.height = H;
   const octx = off.getContext('2d');
-
-  // Extract a highlight-only version: brighter pixels contribute more glow.
   const hiImg = new ImageData(W, H);
   for (let i = 0; i < W*H; i++) {
     const o = i*4;
     const lum = data[o]*0.299 + data[o+1]*0.587 + data[o+2]*0.114;
-    // Soft knee: pixels above ~60% luminance contribute, scaled by brightness
-    const contrib = Math.max(0, (lum - 100) / 155);
+    // Very low knee: even mid-tones contribute to the haze
+    const contrib = Math.max(0, lum / 255);
     hiImg.data[o]   = data[o]   * contrib;
     hiImg.data[o+1] = data[o+1] * contrib;
     hiImg.data[o+2] = data[o+2] * contrib;
@@ -714,7 +753,7 @@ function applyBlur(out, userMask) {
   }
   octx.putImageData(hiImg, 0, 0);
 
-  // Multi-pass blur for wide, soft bloom (two radii blended)
+  // 2. Multi-radius blur for wide, soft bloom
   const makeBlurred = (radius) => {
     const c2 = document.createElement('canvas');
     c2.width = W; c2.height = H;
@@ -723,37 +762,54 @@ function applyBlur(out, userMask) {
     ctx2.drawImage(off, 0, 0);
     return ctx2.getImageData(0, 0, W, H).data;
   };
-  const glow1 = makeBlurred(6);   // tight glow
-  const glow2 = makeBlurred(14);  // wide haze
+  const glow1 = makeBlurred(8);   // tight glow
+  const glow2 = makeBlurred(20);  // wide haze
+  const glow3 = makeBlurred(40);  // very wide atmospheric
 
-  // Also make a lightly blurred version of the full image for overall softening
+  // 3. Heavily blurred version of full image for detail softening
   const offFull = document.createElement('canvas');
   offFull.width = W; offFull.height = H;
   offFull.getContext('2d').putImageData(out, 0, 0);
   const offFull2 = document.createElement('canvas');
   offFull2.width = W; offFull2.height = H;
   const fctx = offFull2.getContext('2d');
-  fctx.filter = 'blur(3px)';
+  fctx.filter = 'blur(6px)';
   fctx.drawImage(offFull, 0, 0);
   const softened = fctx.getImageData(0, 0, W, H).data;
+
+  // 4. Milky veil color (warm haze tint)
+  const hazeR = 210, hazeG = 200, hazeB = 185;
 
   for (let i = 0; i < W*H; i++) {
     const m = userMask[i]/255;
     if (m < 0.02) continue;
     const o = i*4;
-    // Additive bloom from highlights
-    const bloomR = glow1[o]*0.5 + glow2[o]*0.5;
-    const bloomG = glow1[o+1]*0.5 + glow2[o+1]*0.5;
-    const bloomB = glow1[o+2]*0.5 + glow2[o+2]*0.5;
-    // Screen blend: result = 1 - (1-base)(1-bloom)
-    const sr = 1 - (1 - data[o]/255)   * (1 - bloomR*m*0.55/255);
-    const sg = 1 - (1 - data[o+1]/255) * (1 - bloomG*m*0.55/255);
-    const sb = 1 - (1 - data[o+2]/255) * (1 - bloomB*m*0.55/255);
-    // Also mix in slight softening of detail
-    const softMix = m * 0.25;
-    data[o]   = (sr*255) * (1-softMix) + softened[o]   * softMix;
-    data[o+1] = (sg*255) * (1-softMix) + softened[o+1] * softMix;
-    data[o+2] = (sb*255) * (1-softMix) + softened[o+2] * softMix;
+    // Blend three glow radii
+    const bloomR = glow1[o]*0.3 + glow2[o]*0.4 + glow3[o]*0.3;
+    const bloomG = glow1[o+1]*0.3 + glow2[o+1]*0.4 + glow3[o+1]*0.3;
+    const bloomB = glow1[o+2]*0.3 + glow2[o+2]*0.4 + glow3[o+2]*0.3;
+
+    // Screen blend with strong multiplier
+    const bloomStr = m * 0.9;
+    const sr = 1 - (1 - data[o]/255)   * (1 - bloomR*bloomStr/255);
+    const sg = 1 - (1 - data[o+1]/255) * (1 - bloomG*bloomStr/255);
+    const sb = 1 - (1 - data[o+2]/255) * (1 - bloomB*bloomStr/255);
+
+    // Detail softening: blend toward blurred version
+    const softMix = m * 0.55;
+    let rr = (sr*255) * (1-softMix) + softened[o]   * softMix;
+    let gg = (sg*255) * (1-softMix) + softened[o+1] * softMix;
+    let bb = (sb*255) * (1-softMix) + softened[o+2] * softMix;
+
+    // Milky haze overlay: at high intensity, add a translucent warm veil
+    const hazeMix = m * m * 0.3;
+    rr = rr * (1-hazeMix) + hazeR * hazeMix;
+    gg = gg * (1-hazeMix) + hazeG * hazeMix;
+    bb = bb * (1-hazeMix) + hazeB * hazeMix;
+
+    data[o]   = Math.min(255, rr);
+    data[o+1] = Math.min(255, gg);
+    data[o+2] = Math.min(255, bb);
   }
 }
 
