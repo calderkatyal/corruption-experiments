@@ -645,28 +645,50 @@ function applyStains(out, userMask) {
 }
 
 function applyFading(out, userMask) {
+  // Real photochemical fading: UV/light degrades pigment binders.
+  // Effect: broad desaturation, loss of tonal range (contrast compression),
+  // value shifts toward a bleached, chalky midtone. Some pigments fade
+  // unevenly (e.g. fugitive reds/magentas bleach faster than earth tones).
   const data = out.data;
-  // pick a random hue range
-  const hueCenter = rng();
-  const hueWidth = 0.12;
-  // smooth mask spatially
   const field = new Float32Array(W*H);
   for (let i = 0; i < userMask.length; i++) field[i] = userMask[i]/255;
-  blurFloatField(field, W, H, 15);
+  blurFloatField(field, W, H, 12);
+
+  // Noise for uneven fading (simulates varied pigment stability)
+  const fadeNoise = new Float32Array(W*H);
+  for (let i = 0; i < fadeNoise.length; i++) fadeNoise[i] = rng();
+  blurFloatField(fadeNoise, W, H, 20);
+
+  // Target bleached value: chalky warm off-white
+  const bleachR = 215, bleachG = 205, bleachB = 195;
+
   for (let i = 0; i < W*H; i++) {
-    const m = Math.min(field[i] * 15, 1);
-    if (m < 0.02) continue;
+    const raw = field[i];
+    if (raw < 0.01) continue;
+    // Amplify so even moderate brush gives visible effect
+    const m = Math.min(raw * 3, 1);
     const o = i*4;
-    const hsv = rgb2hsv(data[o], data[o+1], data[o+2]);
-    let dh = Math.abs(hsv[0] - hueCenter);
-    if (dh > 0.5) dh = 1 - dh;
-    if (dh < hueWidth) {
-      const w = (1 - dh/hueWidth) * m;
-      hsv[1] *= (1 - 0.75*w);
-      hsv[2] = hsv[2] * (1 - 0.1*w) + 0.1*w;
-      const rgb = hsv2rgb(hsv[0], hsv[1], hsv[2]);
-      data[o] = rgb[0]; data[o+1] = rgb[1]; data[o+2] = rgb[2];
-    }
+    const r = data[o], g = data[o+1], b = data[o+2];
+
+    // Noise-modulated strength: some areas fade more
+    const n = 0.6 + 0.4 * fadeNoise[i];
+    const strength = m * n;
+
+    // Desaturate: pull toward luminance
+    const lum = r*0.299 + g*0.587 + b*0.114;
+    const desatR = r + (lum - r) * strength * 0.85;
+    const desatG = g + (lum - g) * strength * 0.85;
+    const desatB = b + (lum - b) * strength * 0.85;
+
+    // Compress contrast toward bleached midtone
+    const bleach = strength * 0.6;
+    const outR = desatR * (1 - bleach) + bleachR * bleach;
+    const outG = desatG * (1 - bleach) + bleachG * bleach;
+    const outB = desatB * (1 - bleach) + bleachB * bleach;
+
+    data[o]   = Math.max(0, Math.min(255, outR));
+    data[o+1] = Math.max(0, Math.min(255, outG));
+    data[o+2] = Math.max(0, Math.min(255, outB));
   }
 }
 
@@ -736,63 +758,109 @@ function applyBlur(out, userMask) {
 }
 
 function applyDeposits(out, userMask) {
-  // Surface deposits: grime, soot, and salt efflorescence.
-  // Grime/soot: darkens and desaturates toward warm grey-brown.
-  // Salt: sparse bright crystalline speckles on top.
+  // Surface deposits: three distinct degradation phenomena layered together.
+  // 1. Grime: oily, sticky particulate that accumulates in textured areas and
+  //    crevices. Warm dark brown film that obscures and desaturates.
+  // 2. Soot: carbon black particles from candle/fire smoke. Cool black,
+  //    heavier in upper regions. Very opaque at high intensity.
+  // 3. Salt efflorescence: white crystalline crusts from moisture migration
+  //    through masonry. Forms irregular patches and veins, not just speckles.
   const data = out.data;
   const field = new Float32Array(W*H);
   for (let i = 0; i < userMask.length; i++) field[i] = userMask[i]/255;
-  blurFloatField(field, W, H, 10);
+  blurFloatField(field, W, H, 6);
 
-  // Noise field for spatial variation (patchy grime accumulation)
-  const grime = new Float32Array(W*H);
-  for (let i = 0; i < grime.length; i++) grime[i] = rng();
-  blurFloatField(grime, W, H, 12);
-  // Normalize
-  let lo = Infinity, hi = -Infinity;
-  for (let i = 0; i < grime.length; i++) { if (grime[i]<lo) lo=grime[i]; if (grime[i]>hi) hi=grime[i]; }
-  const span = (hi-lo)||1;
-  for (let i = 0; i < grime.length; i++) grime[i] = (grime[i]-lo)/span;
-
-  // Fine-grain noise for texture
-  const fine = new Float32Array(W*H);
-  for (let i = 0; i < fine.length; i++) fine[i] = rng();
-  blurFloatField(fine, W, H, 1);
-
-  // Grime tint: warm dark brown-grey
-  const grimeTint = [58, 48, 38];
-  // Soot tint: cool dark grey
-  const sootTint = [35, 33, 32];
+  // Helper: generate normalized noise via canvas Gaussian blur (no grid artifacts)
+  function makeNoise(blurPx) {
+    const arr = new Float32Array(W*H);
+    const nc = document.createElement('canvas');
+    nc.width = W; nc.height = H;
+    const nctx = nc.getContext('2d');
+    const nimg = nctx.createImageData(W, H);
+    for (let i = 0; i < W*H; i++) {
+      const v = Math.floor(rng()*255);
+      nimg.data[i*4]=v; nimg.data[i*4+1]=v; nimg.data[i*4+2]=v; nimg.data[i*4+3]=255;
+    }
+    nctx.putImageData(nimg, 0, 0);
+    const nc2 = document.createElement('canvas');
+    nc2.width = W; nc2.height = H;
+    const nctx2 = nc2.getContext('2d');
+    nctx2.filter = `blur(${blurPx}px)`;
+    nctx2.drawImage(nc, 0, 0);
+    const blurred = nctx2.getImageData(0, 0, W, H).data;
+    let lo=Infinity, hi=-Infinity;
+    for (let i=0;i<W*H;i++){const v=blurred[i*4];if(v<lo)lo=v;if(v>hi)hi=v;}
+    const sp=(hi-lo)||1;
+    for (let i=0;i<W*H;i++) arr[i]=(blurred[i*4]-lo)/sp;
+    return arr;
+  }
+  const patchNoise = makeNoise(18); // large-scale patchy grime
+  const fineNoise = makeNoise(2);   // fine gritty texture
+  const medNoise = makeNoise(8);    // soot/grime boundary
+  const saltNoise = makeNoise(4);   // salt crystal patches
 
   for (let i = 0; i < W*H; i++) {
     const m = field[i];
     if (m < 0.01) continue;
     const o = i*4;
-    const g = grime[i];
-    const f = fine[i];
+    const px = patchNoise[i], fx = fineNoise[i], mx = medNoise[i];
+    const y = Math.floor(i / W);
 
-    // Mix between grime (warm) and soot (cool) based on noise
-    const sootBias = Math.max(0, g - 0.5) * 2; // upper half of noise → sootier
-    const tR = grimeTint[0]*(1-sootBias) + sootTint[0]*sootBias;
-    const tG = grimeTint[1]*(1-sootBias) + sootTint[1]*sootBias;
-    const tB = grimeTint[2]*(1-sootBias) + sootTint[2]*sootBias;
+    // Surface deposit model: a translucent veil of particulate matter.
+    // Rather than simply blending toward a dark color (which obliterates
+    // dark paintings), we model the deposit as:
+    //   1. Contrast reduction: compress pixel values toward a mid-brown anchor
+    //   2. Color shift: warm (grime) or cool (soot) tint
+    //   3. Slight darkening on top
+    // This preserves visibility even on dark source paintings.
 
-    // Deposit opacity: modulated by mask, patchy noise, and fine texture
-    const opacity = m * (0.3 + 0.7*g) * (0.7 + 0.3*f);
-    // Darken + tint: multiply blend with deposit color
-    const strength = Math.min(0.85, opacity * 0.9);
-    data[o]   = data[o]   * (1-strength) + tR * strength;
-    data[o+1] = data[o+1] * (1-strength) + tG * strength;
-    data[o+2] = data[o+2] * (1-strength) + tB * strength;
+    const vertBias = 1 - (y / H) * 0.3;
+    const sootFrac = mx * vertBias;
 
-    // Salt efflorescence: sparse bright speckles in heavily deposited areas
-    if (m > 0.3 && rng() < 0.008 * m) {
-      const saltBright = 180 + rng()*60;
-      const sa = 0.3 + rng()*0.4;
-      data[o]   = data[o]*(1-sa) + saltBright*sa;
-      data[o+1] = data[o+1]*(1-sa) + (saltBright-10)*sa;
-      data[o+2] = data[o+2]*(1-sa) + (saltBright-20)*sa;
+    // Anchor point: mid-brown for grime, dark grey for soot
+    const anchorR = 95*(1-sootFrac) + 55*sootFrac + fx*15;
+    const anchorG = 80*(1-sootFrac) + 50*sootFrac + fx*10;
+    const anchorB = 60*(1-sootFrac) + 50*sootFrac + fx*5;
+
+    // Deposit strength: patchy, textured
+    const rawStr = m * (0.3 + 0.7*px) * (0.85 + 0.15*fx);
+    const strength = Math.min(0.75, rawStr * 0.8);
+
+    let rr = data[o], gg = data[o+1], bb = data[o+2];
+    // Compress toward anchor (reduces contrast, adds veil)
+    rr = rr * (1 - strength) + anchorR * strength;
+    gg = gg * (1 - strength) + anchorG * strength;
+    bb = bb * (1 - strength) + anchorB * strength;
+
+    // --- Layer 3: Salt efflorescence (white crystalline crusts) ---
+    // Forms irregular patches where moisture has migrated through substrate
+    if (m > 0.15) {
+      const saltThresh = 0.7 - m * 0.45; // more salt at higher intensity
+      if (saltNoise[i] > saltThresh) {
+        const saltStr = ((saltNoise[i] - saltThresh) / (1 - saltThresh));
+        const saltOpacity = saltStr * m * 0.8;
+        // Salt color: chalky white with slight warm or cool variation
+        const warm = fx > 0.5;
+        const saltR = warm ? 230 : 220;
+        const saltG = warm ? 225 : 222;
+        const saltB = warm ? 210 : 225;
+        // Additive/screen blend for crystalline highlight appearance
+        rr = rr * (1 - saltOpacity) + saltR * saltOpacity;
+        gg = gg * (1 - saltOpacity) + saltG * saltOpacity;
+        bb = bb * (1 - saltOpacity) + saltB * saltOpacity;
+        // Fine granularity within salt patches
+        if (rng() < 0.15 * saltStr * m) {
+          const sparkle = 0.15 + rng()*0.25;
+          rr = Math.min(255, rr + 40*sparkle);
+          gg = Math.min(255, gg + 38*sparkle);
+          bb = Math.min(255, bb + 35*sparkle);
+        }
+      }
     }
+
+    data[o]   = Math.max(0, Math.min(255, rr));
+    data[o+1] = Math.max(0, Math.min(255, gg));
+    data[o+2] = Math.max(0, Math.min(255, bb));
   }
 }
 
@@ -868,15 +936,17 @@ function _applyAllImpl() {
 }
 
 function sampleCanvasColor() {
+  // Exposed ground/gesso: aged linen canvas primed with chalk gesso.
+  // Off-white to warm tan, clearly distinct from any paint layer.
+  // Only lightly influenced by the painting's palette.
   let mr=0, mg=0, mb=0, n=0;
   const od = originalImageData.data;
   for (let i = 0; i < od.length; i += 4*40) { mr += od[i]; mg += od[i+1]; mb += od[i+2]; n++; }
   mr/=n; mg/=n; mb/=n;
-  // Bias toward warm aged-canvas tone
   return [
-    Math.min(255, mr*0.55 + 195*0.45),
-    Math.min(255, mg*0.55 + 170*0.45),
-    Math.min(255, mb*0.55 + 130*0.45),
+    Math.min(255, mr*0.15 + 215*0.85),
+    Math.min(255, mg*0.15 + 200*0.85),
+    Math.min(255, mb*0.15 + 175*0.85),
   ];
 }
 
@@ -893,54 +963,85 @@ function applyPaintLossInUserRegion(out, userMask) {
   if (maskSum === 0) return;
   const [cr, cg, cb] = sampleCanvasColor();
 
-  // Low-frequency noise (patch scale ~ 8px)
+  // Low-frequency noise (patch shapes) using canvas Gaussian blur
+  // to avoid box-blur grid artifacts.
   const noiseLow = new Float32Array(W*H);
-  for (let i = 0; i < noiseLow.length; i++) noiseLow[i] = rng();
-  blurFloatField(noiseLow, W, H, 6);
-  // Normalize to 0..1
-  let lo = Infinity, hi = -Infinity;
-  for (let i = 0; i < noiseLow.length; i++) { if (noiseLow[i]<lo) lo=noiseLow[i]; if (noiseLow[i]>hi) hi=noiseLow[i]; }
-  const span = (hi - lo) || 1;
-  for (let i = 0; i < noiseLow.length; i++) noiseLow[i] = (noiseLow[i]-lo)/span;
+  {
+    const nc = document.createElement('canvas');
+    nc.width = W; nc.height = H;
+    const nctx = nc.getContext('2d');
+    const nimg = nctx.createImageData(W, H);
+    for (let i = 0; i < W*H; i++) {
+      const v = Math.floor(rng() * 255);
+      nimg.data[i*4] = v; nimg.data[i*4+1] = v; nimg.data[i*4+2] = v; nimg.data[i*4+3] = 255;
+    }
+    nctx.putImageData(nimg, 0, 0);
+    const nc2 = document.createElement('canvas');
+    nc2.width = W; nc2.height = H;
+    const nctx2 = nc2.getContext('2d');
+    nctx2.filter = 'blur(10px)';
+    nctx2.drawImage(nc, 0, 0);
+    const blurred = nctx2.getImageData(0, 0, W, H).data;
+    let lo = Infinity, hi = -Infinity;
+    for (let i = 0; i < W*H; i++) { const v = blurred[i*4]; if (v<lo) lo=v; if (v>hi) hi=v; }
+    const span = (hi - lo) || 1;
+    for (let i = 0; i < W*H; i++) noiseLow[i] = (blurred[i*4] - lo) / span;
+  }
 
-  // High-frequency noise for edge irregularity
+  // High-frequency noise for edge irregularity (canvas blur, small radius)
   const noiseHi = new Float32Array(W*H);
-  for (let i = 0; i < noiseHi.length; i++) noiseHi[i] = rng();
-  blurFloatField(noiseHi, W, H, 1);
+  {
+    const nc = document.createElement('canvas');
+    nc.width = W; nc.height = H;
+    const nctx = nc.getContext('2d');
+    const nimg = nctx.createImageData(W, H);
+    for (let i = 0; i < W*H; i++) {
+      const v = Math.floor(rng() * 255);
+      nimg.data[i*4] = v; nimg.data[i*4+1] = v; nimg.data[i*4+2] = v; nimg.data[i*4+3] = 255;
+    }
+    nctx.putImageData(nimg, 0, 0);
+    const nc2 = document.createElement('canvas');
+    nc2.width = W; nc2.height = H;
+    const nctx2 = nc2.getContext('2d');
+    nctx2.filter = 'blur(2px)';
+    nctx2.drawImage(nc, 0, 0);
+    const blurred = nctx2.getImageData(0, 0, W, H).data;
+    for (let i = 0; i < W*H; i++) noiseHi[i] = blurred[i*4] / 255;
+  }
 
   const flake = new Float32Array(W*H);
   for (let i = 0; i < W*H; i++) {
     const m = userMask[i] / 255;
     if (m < 0.04) continue;
-    // Map intensity to a threshold on noiseLow.
-    // m=0.1 → only ~5% of pixels (deepest noise dips) become flakes
-    // m=0.5 → ~35%
-    // m=1.0 → ~75% (heavy loss but never 100% — paint islands remain)
-    const thresh = Math.min(1, (m * m * 0.75 + m * 0.05) * 2);
+    // Map intensity to threshold on noiseLow.
+    // m=0.1 → ~10% of pixels (small isolated flakes)
+    // m=0.5 → ~60% (large patches, ragged)
+    // m=1.0 → ~98% (nearly total removal, only tiny paint islands remain)
+    const thresh = Math.min(0.995, m * m * 0.4 + m * 0.58);
     // perturb with high-freq noise so edges are jagged
-    const sample = noiseLow[i] - (noiseHi[i] - 0.5) * 0.18 * m;
+    const sample = noiseLow[i] - (noiseHi[i] - 0.5) * 0.22 * m;
     if (sample < thresh) {
-      // strength = how far below threshold, scaled
-      const depth = (thresh - sample) / Math.max(0.05, thresh);
-      flake[i] = Math.min(1, depth * (0.55 + 0.45 * m));
+      const depth = (thresh - sample) / Math.max(0.02, thresh);
+      flake[i] = Math.min(1, depth * (0.3 + 0.7 * m));
     }
   }
-  // Subtle blur to soften 1px artifacts but keep ragged shape
-  blurFloatField(flake, W, H, 0.8 | 0 || 1);
-
-  // Render: replace with sampled canvas color, with slight per-pixel value variation
-  // and a darker rim around flake edges (suggesting exposed gesso lip).
+  // Render: replace with exposed ground/canvas color.
+  // At high intensity, paint is fully gone → bare substrate visible.
+  // Rim darkening at flake edges suggests the exposed gesso lip where
+  // paint layer breaks off (common in real flaking).
   for (let i = 0; i < W*H; i++) {
     const f = flake[i];
-    if (f < 0.06) continue;
+    if (f < 0.04) continue;
     const o = i*4;
-    // Edge darkening: where flake is moderate (rim), darken slightly
-    const rim = (f > 0.15 && f < 0.45) ? (1 - Math.abs(f - 0.3)/0.15) * 0.25 : 0;
-    const a = Math.min(0.96, f * 1.15);
-    const j = (rng()-0.5)*22;
-    const tr = (cr + j) * (1 - rim);
-    const tg = (cg + j) * (1 - rim);
-    const tb = (cb + j) * (1 - rim);
+    // Full replacement at f=1: completely bare substrate
+    const a = Math.min(1.0, f * 1.05);
+    // Edge darkening at flake rims
+    const rim = (f > 0.1 && f < 0.5) ? (1 - Math.abs(f - 0.3)/0.2) * 0.35 : 0;
+    const j = (rng()-0.5)*18;
+    // Substrate color with slight variation
+    const tr = Math.max(0, (cr + j) * (1 - rim));
+    const tg = Math.max(0, (cg + j) * (1 - rim));
+    const tb = Math.max(0, (cb + j) * (1 - rim));
     data[o]   = data[o]   * (1 - a) + tr * a;
     data[o+1] = data[o+1] * (1 - a) + tg * a;
     data[o+2] = data[o+2] * (1 - a) + tb * a;
@@ -1055,43 +1156,53 @@ function runPreset(id, fn) {
   applyAll();
 }
 document.getElementById('preset-1').onclick = () => runPreset(1, () => {
-  // Light aging: gentle yellowing everywhere, faint cracks, tiny paint loss
-  presetFill('yellowing', 0.35);
-  presetBlobs('cracks', 3, W*0.25, W*0.45, 0.35);
-  presetCorrelatedDamage(4, W*0.04, W*0.09, 0.3, 0.25);
+  // Light aging: gentle yellowing, faint cracks, slight deposits in recesses
+  presetFill('yellowing', 0.3);
+  presetFill('deposits', 0.15);
+  presetBlobs('cracks', 3, W*0.2, W*0.4, 0.3);
+  presetCorrelatedDamage(3, W*0.03, W*0.07, 0.25, 0.15);
+  presetBlobs('blur', 2, W*0.15, W*0.3, 0.15);
 });
 document.getElementById('preset-2').onclick = () => runPreset(2, () => {
-  // Heavy craquelure with associated paint loss flakes
-  presetFill('cracks', 0.7);
-  presetFill('yellowing', 0.4);
-  presetCorrelatedDamage(12, W*0.05, W*0.12, 0.6, 0.55);
+  // Heavy craquelure: dense crack network, significant paint loss at junctions,
+  // yellowed varnish, grime settled in cracks
+  presetFill('cracks', 0.8);
+  presetFill('yellowing', 0.45);
+  presetBlobs('deposits', 6, W*0.08, W*0.2, 0.35);
+  presetCorrelatedDamage(15, W*0.04, W*0.12, 0.7, 0.6);
+  presetBlobs('blur', 3, W*0.1, W*0.25, 0.2);
 });
 document.getElementById('preset-3').onclick = () => runPreset(3, () => {
-  // Water damage: large stains, blur near them, paint loss at stain centers
+  // Water damage: stains with tide lines, bloom/haze from moisture,
+  // paint loss where water pooled, salt deposits from evaporation
   for (let k = 0; k < 5; k++) {
     const cx = Math.floor(Math.random()*W);
     const cy = Math.floor(Math.random()*H);
     const r = W*(0.1 + Math.random()*0.18);
-    presetPaintBlob(masks.stains, cx, cy, r, 0.7);
-    presetPaintBlob(masks.blur, cx, cy, r*0.9, 0.55);
-    presetPaintBlob(masks.paintloss, cx, cy, r*0.35, 0.4);
+    presetPaintBlob(masks.stains, cx, cy, r, 0.75);
+    presetPaintBlob(masks.blur, cx, cy, r*1.1, 0.5);
+    presetPaintBlob(masks.paintloss, cx, cy, r*0.3, 0.45);
+    presetPaintBlob(masks.deposits, cx, cy, r*0.6, 0.55);
   }
-  presetFill('yellowing', 0.25);
+  presetFill('yellowing', 0.2);
 });
 document.getElementById('preset-4').onclick = () => runPreset(4, () => {
-  // Sun faded: heavy fading, mild yellowing, slight blur, no cracks
-  presetFill('fading', 0.75);
-  presetFill('yellowing', 0.3);
-  presetBlobs('blur', 4, W*0.15, W*0.3, 0.25);
+  // Sun faded: severe bleaching, bloom from degraded varnish, mild yellowing
+  presetFill('fading', 0.8);
+  presetFill('blur', 0.4);
+  presetFill('yellowing', 0.25);
+  presetBlobs('cracks', 2, W*0.15, W*0.3, 0.2);
 });
 document.getElementById('preset-5').onclick = () => runPreset(5, () => {
-  // Catastrophic: everything, heavy
-  presetFill('yellowing', 0.55);
-  presetFill('fading', 0.45);
-  presetFill('cracks', 0.85);
-  presetCorrelatedDamage(20, W*0.05, W*0.15, 0.8, 0.75);
-  presetBlobs('stains', 6, W*0.08, W*0.18, 0.6);
-  presetBlobs('blur', 5, W*0.1, W*0.2, 0.4);
+  // Catastrophic: severe multi-factor degradation — fire/flood/neglect
+  presetFill('yellowing', 0.6);
+  presetFill('fading', 0.5);
+  presetFill('cracks', 0.9);
+  presetFill('deposits', 0.65);
+  presetCorrelatedDamage(25, W*0.04, W*0.15, 0.85, 0.8);
+  presetBlobs('stains', 8, W*0.08, W*0.2, 0.7);
+  presetBlobs('blur', 5, W*0.1, W*0.25, 0.5);
+  presetBlobs('paintloss', 4, W*0.1, W*0.2, 0.7);
 });
 window.addEventListener('keydown', e => {
   if ((e.metaKey || e.ctrlKey) && e.key === 'z' && !e.shiftKey) { e.preventDefault(); undo(); }
