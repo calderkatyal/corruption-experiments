@@ -486,10 +486,14 @@ function applyCracks(out, userMask) {
   for (let i = 0; i < userMask.length; i++) maskSum += userMask[i];
   if (maskSum === 0) return new Uint8Array(W*H);
   const meanMask = maskSum / userMask.length / 255;
-  // target site count: many small cells for fine craquelure
-  const target = Math.max(40, Math.floor(meanMask * W * H / 60));
-  const minDist = 5; // minimum spacing between sites to avoid tiny cells
+  // target site count: fine craquelure but not so dense that cells become tiny filled blobs
+  const target = Math.max(40, Math.floor(meanMask * W * H / 200));
+  const minDist = 8; // minimum spacing between sites to avoid tiny cells
   const minDist2 = minDist * minDist;
+  // Grid-based spatial lookup for efficient minimum distance checks
+  const gridCell = minDist;
+  const gridW = Math.ceil(W / gridCell), gridH = Math.ceil(H / gridCell);
+  const grid = new Array(gridW * gridH).fill(null).map(() => []);
   let attempts = 0;
   while (sites.length < target && attempts < target * 50) {
     attempts++;
@@ -497,13 +501,24 @@ function applyCracks(out, userMask) {
     const y = Math.floor(rng() * H);
     const m = userMask[y*W + x] / 255;
     if (rng() < m) {
-      // Check minimum distance from existing sites
+      // Grid-based minimum distance check (all sites, O(1) per check)
+      const gx = Math.floor(x / gridCell), gy = Math.floor(y / gridCell);
       let tooClose = false;
-      for (let k = sites.length - 1; k >= Math.max(0, sites.length - 50); k--) {
-        const dx = sites[k][0] - x, dy = sites[k][1] - y;
-        if (dx*dx + dy*dy < minDist2) { tooClose = true; break; }
+      for (let dy = -1; dy <= 1 && !tooClose; dy++) {
+        for (let dx = -1; dx <= 1 && !tooClose; dx++) {
+          const nx = gx + dx, ny = gy + dy;
+          if (nx < 0 || nx >= gridW || ny < 0 || ny >= gridH) continue;
+          const cell = grid[ny * gridW + nx];
+          for (let k = 0; k < cell.length; k++) {
+            const ex = cell[k][0] - x, ey = cell[k][1] - y;
+            if (ex*ex + ey*ey < minDist2) { tooClose = true; break; }
+          }
+        }
       }
-      if (!tooClose) sites.push([x, y]);
+      if (!tooClose) {
+        sites.push([x, y]);
+        grid[gy * gridW + gx].push([x, y]);
+      }
     }
   }
   if (sites.length < 2) return new Uint8Array(W*H);
@@ -524,14 +539,15 @@ function applyCracks(out, userMask) {
       // edge if difference of distances is tiny -> hairline
       const sd1 = Math.sqrt(d1), sd2 = Math.sqrt(d2);
       const diff = sd2 - sd1;
-      // Skip tiny cells: if nearest site is very close, the "edge" is just
-      // a small filled polygon, not a realistic crack line.
-      if (diff < 0.6 && sd1 > 2.5) {
+      // Scale crack width by cell size: large cells get full 0.8px width,
+      // small cells get proportionally thinner lines to prevent filled polygons.
+      const edgeWidth = Math.min(0.8, sd1 * 0.12);
+      if (diff < edgeWidth && sd1 > 1.5) {
         crackMask[idx] = 255;
         const o = idx*4;
         const a = userMask[idx] / 255;
         // soft anti-aliased darkening, not pure black
-        const k = 1 - 0.55 * a * (1 - diff/0.6);
+        const k = 1 - 0.55 * a * (1 - diff/edgeWidth);
         data[o]   = data[o]   * k;
         data[o+1] = data[o+1] * k;
         data[o+2] = data[o+2] * k;
