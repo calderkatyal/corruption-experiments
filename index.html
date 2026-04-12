@@ -123,7 +123,8 @@ const CORRUPTIONS = [
   { id: "yellowing",  label: "Yellowing",         color: [240, 230, 60] },
   { id: "stains",     label: "Stains",            color: [120, 70, 40] },
   { id: "fading",     label: "Fading",            color: [180, 180, 255] },
-  { id: "blur",       label: "Blur (abrasion)",   color: [80, 220, 220] },
+  { id: "blur",       label: "Bloom",              color: [80, 220, 220] },
+  { id: "deposits",   label: "Surface deposits",   color: [160, 140, 100] },
 ];
 
 // ---------- State ----------
@@ -583,8 +584,8 @@ function applyYellowing(out, userMask) {
     if (m < 0.01) continue;
     const o = i*4;
     const lab = rgb2lab(data[o], data[o+1], data[o+2]);
-    const offsetB = (8 + 18 * noise[i]) * m;  // toward yellow
-    const offsetA = (2 + 6  * noise[i]) * m;  // slight reddish
+    const offsetB = (16 + 36 * noise[i]) * m;  // toward yellow (2x)
+    const offsetA = (4 + 12  * noise[i]) * m;  // slight reddish (2x)
     lab[1] += offsetA;
     lab[2] += offsetB;
     const rgb = lab2rgb(lab[0], lab[1], lab[2]);
@@ -653,7 +654,7 @@ function applyFading(out, userMask) {
   for (let i = 0; i < userMask.length; i++) field[i] = userMask[i]/255;
   blurFloatField(field, W, H, 15);
   for (let i = 0; i < W*H; i++) {
-    const m = Math.min(field[i] * 3, 1);
+    const m = Math.min(field[i] * 15, 1);
     if (m < 0.02) continue;
     const o = i*4;
     const hsv = rgb2hsv(data[o], data[o+1], data[o+2]);
@@ -670,26 +671,128 @@ function applyFading(out, userMask) {
 }
 
 function applyBlur(out, userMask) {
-  // Use canvas filter for high-quality gaussian blur, then blend per-pixel using mask
-  // First, paint current 'out' to an offscreen canvas, blur it, read it back.
+  // Bloom / haze: bright areas bleed outward into surrounding pixels,
+  // producing a soft luminous glow typical of aged varnish or lens bloom.
+  const data = out.data;
   const off = document.createElement('canvas');
   off.width = W; off.height = H;
   const octx = off.getContext('2d');
-  octx.putImageData(out, 0, 0);
-  const off2 = document.createElement('canvas');
-  off2.width = W; off2.height = H;
-  const o2 = off2.getContext('2d');
-  o2.filter = 'blur(4px)';
-  o2.drawImage(off, 0, 0);
-  const blurred = o2.getImageData(0, 0, W, H).data;
-  const data = out.data;
+
+  // Extract a highlight-only version: brighter pixels contribute more glow.
+  const hiImg = new ImageData(W, H);
+  for (let i = 0; i < W*H; i++) {
+    const o = i*4;
+    const lum = data[o]*0.299 + data[o+1]*0.587 + data[o+2]*0.114;
+    // Soft knee: pixels above ~60% luminance contribute, scaled by brightness
+    const contrib = Math.max(0, (lum - 100) / 155);
+    hiImg.data[o]   = data[o]   * contrib;
+    hiImg.data[o+1] = data[o+1] * contrib;
+    hiImg.data[o+2] = data[o+2] * contrib;
+    hiImg.data[o+3] = 255;
+  }
+  octx.putImageData(hiImg, 0, 0);
+
+  // Multi-pass blur for wide, soft bloom (two radii blended)
+  const makeBlurred = (radius) => {
+    const c2 = document.createElement('canvas');
+    c2.width = W; c2.height = H;
+    const ctx2 = c2.getContext('2d');
+    ctx2.filter = `blur(${radius}px)`;
+    ctx2.drawImage(off, 0, 0);
+    return ctx2.getImageData(0, 0, W, H).data;
+  };
+  const glow1 = makeBlurred(6);   // tight glow
+  const glow2 = makeBlurred(14);  // wide haze
+
+  // Also make a lightly blurred version of the full image for overall softening
+  const offFull = document.createElement('canvas');
+  offFull.width = W; offFull.height = H;
+  offFull.getContext('2d').putImageData(out, 0, 0);
+  const offFull2 = document.createElement('canvas');
+  offFull2.width = W; offFull2.height = H;
+  const fctx = offFull2.getContext('2d');
+  fctx.filter = 'blur(3px)';
+  fctx.drawImage(offFull, 0, 0);
+  const softened = fctx.getImageData(0, 0, W, H).data;
+
   for (let i = 0; i < W*H; i++) {
     const m = userMask[i]/255;
     if (m < 0.02) continue;
     const o = i*4;
-    data[o]   = data[o]*(1-m) + blurred[o]*m;
-    data[o+1] = data[o+1]*(1-m) + blurred[o+1]*m;
-    data[o+2] = data[o+2]*(1-m) + blurred[o+2]*m;
+    // Additive bloom from highlights
+    const bloomR = glow1[o]*0.5 + glow2[o]*0.5;
+    const bloomG = glow1[o+1]*0.5 + glow2[o+1]*0.5;
+    const bloomB = glow1[o+2]*0.5 + glow2[o+2]*0.5;
+    // Screen blend: result = 1 - (1-base)(1-bloom)
+    const sr = 1 - (1 - data[o]/255)   * (1 - bloomR*m*0.55/255);
+    const sg = 1 - (1 - data[o+1]/255) * (1 - bloomG*m*0.55/255);
+    const sb = 1 - (1 - data[o+2]/255) * (1 - bloomB*m*0.55/255);
+    // Also mix in slight softening of detail
+    const softMix = m * 0.25;
+    data[o]   = (sr*255) * (1-softMix) + softened[o]   * softMix;
+    data[o+1] = (sg*255) * (1-softMix) + softened[o+1] * softMix;
+    data[o+2] = (sb*255) * (1-softMix) + softened[o+2] * softMix;
+  }
+}
+
+function applyDeposits(out, userMask) {
+  // Surface deposits: grime, soot, and salt efflorescence.
+  // Grime/soot: darkens and desaturates toward warm grey-brown.
+  // Salt: sparse bright crystalline speckles on top.
+  const data = out.data;
+  const field = new Float32Array(W*H);
+  for (let i = 0; i < userMask.length; i++) field[i] = userMask[i]/255;
+  blurFloatField(field, W, H, 10);
+
+  // Noise field for spatial variation (patchy grime accumulation)
+  const grime = new Float32Array(W*H);
+  for (let i = 0; i < grime.length; i++) grime[i] = rng();
+  blurFloatField(grime, W, H, 12);
+  // Normalize
+  let lo = Infinity, hi = -Infinity;
+  for (let i = 0; i < grime.length; i++) { if (grime[i]<lo) lo=grime[i]; if (grime[i]>hi) hi=grime[i]; }
+  const span = (hi-lo)||1;
+  for (let i = 0; i < grime.length; i++) grime[i] = (grime[i]-lo)/span;
+
+  // Fine-grain noise for texture
+  const fine = new Float32Array(W*H);
+  for (let i = 0; i < fine.length; i++) fine[i] = rng();
+  blurFloatField(fine, W, H, 1);
+
+  // Grime tint: warm dark brown-grey
+  const grimeTint = [58, 48, 38];
+  // Soot tint: cool dark grey
+  const sootTint = [35, 33, 32];
+
+  for (let i = 0; i < W*H; i++) {
+    const m = field[i];
+    if (m < 0.01) continue;
+    const o = i*4;
+    const g = grime[i];
+    const f = fine[i];
+
+    // Mix between grime (warm) and soot (cool) based on noise
+    const sootBias = Math.max(0, g - 0.5) * 2; // upper half of noise → sootier
+    const tR = grimeTint[0]*(1-sootBias) + sootTint[0]*sootBias;
+    const tG = grimeTint[1]*(1-sootBias) + sootTint[1]*sootBias;
+    const tB = grimeTint[2]*(1-sootBias) + sootTint[2]*sootBias;
+
+    // Deposit opacity: modulated by mask, patchy noise, and fine texture
+    const opacity = m * (0.3 + 0.7*g) * (0.7 + 0.3*f);
+    // Darken + tint: multiply blend with deposit color
+    const strength = Math.min(0.85, opacity * 0.9);
+    data[o]   = data[o]   * (1-strength) + tR * strength;
+    data[o+1] = data[o+1] * (1-strength) + tG * strength;
+    data[o+2] = data[o+2] * (1-strength) + tB * strength;
+
+    // Salt efflorescence: sparse bright speckles in heavily deposited areas
+    if (m > 0.3 && rng() < 0.008 * m) {
+      const saltBright = 180 + rng()*60;
+      const sa = 0.3 + rng()*0.4;
+      data[o]   = data[o]*(1-sa) + saltBright*sa;
+      data[o+1] = data[o+1]*(1-sa) + (saltBright-10)*sa;
+      data[o+2] = data[o+2]*(1-sa) + (saltBright-20)*sa;
+    }
   }
 }
 
@@ -748,6 +851,7 @@ function _applyAllImpl() {
   applyFading(out, masks.fading);
   applyStains(out, masks.stains);
   applyBlur(out, masks.blur);
+  applyDeposits(out, masks.deposits);
   const crackMask = applyCracks(out, masks.cracks);
   applyPaintLoss(out, masks.paintloss.some ? masks.paintloss : masks.paintloss, crackMask.length ? crackMask : new Uint8Array(W*H));
   // Use the user-painted paintloss mask: if user painted paintloss, also synthesize a "fake" crack-like mask within it
@@ -812,7 +916,7 @@ function applyPaintLossInUserRegion(out, userMask) {
     // m=0.1 → only ~5% of pixels (deepest noise dips) become flakes
     // m=0.5 → ~35%
     // m=1.0 → ~75% (heavy loss but never 100% — paint islands remain)
-    const thresh = m * m * 0.75 + m * 0.05;
+    const thresh = Math.min(1, (m * m * 0.75 + m * 0.05) * 2);
     // perturb with high-freq noise so edges are jagged
     const sample = noiseLow[i] - (noiseHi[i] - 0.5) * 0.18 * m;
     if (sample < thresh) {
